@@ -43,6 +43,22 @@ def sanitize(name: str) -> str:
     return re.sub(r'[\\/:*?"<>|\s]+', "-", name).strip("-.")
 
 
+def week_no_of(name: str) -> int:
+    """从目录名提取周号：取第一个数字串（'01.xxx'→1，'第1周'→1）。"""
+    m = re.search(r"\d+", name)
+    return int(m.group()) if m else 0
+
+
+def pdf_page_count(src: str):
+    """权威页数直接读 PDF 原件——磁盘截图可能缺失（被清理）或混入裁剪图，数不可靠。"""
+    try:
+        import fitz
+        with fitz.open(src) as doc:
+            return doc.page_count
+    except Exception:
+        return None
+
+
 def href_of(path: Path) -> str:
     return quote(path.relative_to(SITE).as_posix())
 
@@ -53,7 +69,7 @@ def build_manifest():
     week_dirs = sorted(d for d in BASE.iterdir()
                        if d.is_dir() and WEEK_DIR_RE.match(d.name))
     for wd in week_dirs:
-        week_no = int(re.match(r"\d+", wd.name).group())
+        week_no = week_no_of(wd.name)
         subgroups = [wd] + sorted(d for d in wd.iterdir() if d.is_dir())
         for g in subgroups:
             for f in sorted(g.iterdir()):
@@ -91,7 +107,11 @@ def build_manifest():
         it["html"] = str(folder / f"{slug}-{sanitize(it['title'])}.html")
         if it["ext"] == "pdf":
             it["imgdir"] = str(IMG / slug)
-            it["pages"] = len(list((IMG / slug).glob("p-*.png"))) if (IMG / slug).exists() else 0
+            it["pages"] = pdf_page_count(it["src"])
+            if it["pages"] is None:  # PDF 打不开时退回数截图（严格匹配，裁剪图不算页）
+                d = IMG / slug
+                it["pages"] = len([p for p in d.iterdir()
+                                   if re.fullmatch(r"p-\d+\.png", p.name)]) if d.exists() else 0
     return items
 
 
@@ -144,8 +164,9 @@ def render_pdf(item):
             n += 1
         except Exception as e:
             print(f"  [render fail] page {i}: {e}")
+    total = doc.page_count
     doc.close()
-    return n
+    return total, n
 
 
 def conv_docx(item):
@@ -262,14 +283,30 @@ def build_index(items):
 
 
 def prune_images(items):
+    """清理未被引用的原始页图。保护规则：PDF 还没有转录成品页（或仍是兜底页）时，
+    它的全部页图一律保留——后续转录分块和阶段二质检随时要回读原图；只有已确认
+    完成转录的 PDF 才清理其未被引用的原始页图（例如被裁剪图替换后）。裁剪图等
+    衍生图永不自动删除。"""
     referenced = set()
     for h in SITE.rglob("*.html"):
         for m in re.findall(r'assets/img/([\w\-]+/p-[\d]+\.png)', h.read_text(encoding="utf-8")):
             referenced.add(m.replace("\\", "/"))
+    protected = set()
+    for it in items:
+        if it["ext"] != "pdf":
+            continue
+        h = Path(it["html"])
+        if h.exists() and "<!-- img-fallback -->" not in h.read_text(encoding="utf-8"):
+            continue  # 已有转录成品页，允许清理其未引用原图
+        d = IMG / it["slug"]
+        if d.exists():
+            for f in d.glob("*.png"):
+                protected.add(f.as_posix().replace("\\", "/").split("assets/img/")[-1])
     removed = kept = 0
     for d in IMG.iterdir() if IMG.exists() else []:
-        for f in d.glob("p-*.png"):
-            if f.as_posix().replace("\\", "/").split("assets/img/")[-1] in referenced:
+        for f in d.glob("*.png"):
+            key = f.as_posix().replace("\\", "/").split("assets/img/")[-1]
+            if key in referenced or key in protected or not re.fullmatch(r"p-\d+\.png", f.name):
                 kept += 1
             else:
                 removed += 1
@@ -365,9 +402,9 @@ def main():
             continue
         ext = it["ext"]
         if ext == "pdf":
-            n = render_pdf(it)
-            it["pages"] = n
-            print(f"[pdf rendered] {n} pages -> {it['slug']}")
+            total, rendered = render_pdf(it)
+            it["pages"] = total  # 权威页数以 PDF 原件为准，个别页渲染失败也不缩小任务范围
+            print(f"[pdf rendered] {rendered}/{total} pages -> {it['slug']}")
         elif ext == "docx":
             conv_docx(it); print(f"[docx] {it['title']}")
         elif ext == "txt":

@@ -36,6 +36,9 @@ def check(p: Path):
     orphan = [i for i in ids if i not in hrefs]
     if orphan:
         errs.append(f"未被链接的id:{orphan}")
+    dup_hrefs = sorted({h for h in hrefs if hrefs.count(h) > 1})
+    if dup_hrefs:
+        errs.append(f"重复链接:{dup_hrefs}")
     # nav 必须在 topbar 之后 main 之前
     m = re.search(r'<nav class="tocnav">.*?</nav>', t, re.S)
     if m:

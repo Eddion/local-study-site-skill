@@ -55,12 +55,12 @@
 
 ### 第 1 步：普查（子智能体，产出问题清单）
 
-分组：每任务覆盖 ≤80 页；<30 页的小 PDF 可两三份合并为一个任务；>100 页的单独一个任务。
+分组：每个普查任务覆盖 ≤80 页；<30 页的小 PDF 可两三份合并为一个任务；超过 80 页的 PDF 按连续页段拆成多个任务（如 184 页 → p001-092 / p093-184）。**同一 PDF 拆出的每段报告单独命名：`reports/{{slug}}.p起-止.md`（如 `w11-052.p001-092.md`）**——不要都写成 `{{slug}}.md`，会互相覆盖。修复时把该 slug 的全部页段报告一起交给修复子代理。
 
 **普查子代理提示词模板**（替换 {{占位符}} 后派发）：
 
 ```
-你是课件转录质检员。任务：检查 {{一批slug清单}} 这几份课件页面的「图文重复」问题。
+你是课件转录质检员。任务：检查 {{一批slug清单}} 这几份课件页面的「图文重复」问题（若某份被拆段，只负责指定给你的页段）。
 
 对每一份：
 1. 成品页路径: {{html绝对路径}}；逐页截图目录: {{imgdir}}（p-01.png 起与页码对应）。
@@ -70,7 +70,7 @@
    - B 文字+视觉素材：文字已转录，且页面含真正的视觉素材 → 给出裁剪建议（记录素材在整页图中的位置，用百分比描述，如"下半部分 45%~95%"或"右侧 55%~100%"），同时若页面存在未转录的内容性文字（包括截图内截图里的大段回答/代码/要点）必须指出
    - C 视觉为主页：保持整页图，但需补充图中内容性文字的转录
    - D 无问题：处理已符合标准
-4. 把结果写入（Write）：{{site}}/_qc/reports/{{slug}}.md，格式：
+4. 把结果写入（Write）：{{site}}/_qc/reports/{{slug}}.p{{起}}-{{止}}.md（整份 PDF 一个任务时写 .p1-{{pages}}），格式：
    ## 第 N 页
    - 类型: A/B/C/D
    - 现状: 一句话
@@ -90,7 +90,7 @@
 
 - 成品页: {{html绝对路径}}
 - 逐页截图目录: {{imgdir}}
-- 质检报告: {{site}}/_qc/reports/{{slug}}.md
+- 质检报告: {{site}}/_qc/reports/{{slug}}.p*.md（该 slug 的全部页段报告）
 - 运行 python 用: {{PY}}
 
 处理规则（与质检报告的类型对应）：
@@ -126,17 +126,19 @@ bad=0
 for it in items:
     if it['ext']!='pdf': continue
     p=Path(it['html']); t=p.read_text(encoding='utf-8')
-    pages=sorted(int(m) for m in re.findall(r'pageno\">第 (\d+) 页',t))
+    pages=[int(m) for m in re.findall(r'pageno\">第 (\d+) 页',t)]  # 保持阅读顺序，绝不排序
     n=it.get('pages',0)
     miss=[m for m in re.findall(r'src=\"([^\"]+)\"',t) if m.startswith('../assets') and not (p.parent/unquote(m)).exists()]
-    ok = pages==list(range(1,n+1)) and not miss
+    order_ok = pages==list(range(1,n+1))
+    ok = order_ok and not miss
     bad += (not ok)
-    print(('OK ' if ok else 'BAD'), it['slug'], f'{len(pages)}/{n}', f'badimg={len(miss)}')
+    print(('OK ' if ok else 'BAD'), it['slug'], f'{len(pages)}/{n}', f'badimg={len(miss)}', '' if order_ok else '页码不完整或顺序错乱')
 print('ALL OK' if bad==0 else f'{bad} BAD')
 "
 ```
 
-2. 起本地服务抽查：`{{PY}} -m http.server 8765 --directory {{site}}`，浏览器打开抽查 2~3 个修复过的页面（可截图），确认视觉上不再图文重复。
+2. 起本地服务抽查：`{{PY}} -m http.server 8765 --bind 127.0.0.1 --directory {{site}}`（默认绑 0.0.0.0 会把整个站点——包括含本机绝对路径的 `_manifest.json`——暴露给局域网，必须加 `--bind 127.0.0.1`；只有用户明确要手机访问时才换 0.0.0.0 并说明风险），浏览器打开抽查 2~3 个修复过的页面（可截图），确认视觉上不再图文重复。
+   校验含义说明：ALL OK 承诺的是「页码按阅读顺序完整 + 图片不断链」的结构正确性，**不代表 OCR 逐字正确**——文字正确性靠抽查对照原件。
 3. 更新 `{{site}}/_qc/status.md` 全部状态，写最终总结：处理了哪些 PDF、A/B/C 各修复多少页、裁剪图多少张、校验结果、遗留问题。
 
 ## 优先级提示
