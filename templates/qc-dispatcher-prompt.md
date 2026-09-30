@@ -5,6 +5,7 @@
 - `{{课程根目录}}`：课程文件夹绝对路径
 - `{{site}}`：站点目录绝对路径（通常是 `{{课程根目录}}\site`）
 - `{{PY}}`：运行 python 的命令，如 `uv run --with pillow python`，或依赖已装好的 `python`
+- `{{html绝对路径}}` = `{{site}}\{{manifest 里的 html 相对路径}}`（manifest 的 `html`/`imgdir` 存的是相对 `site/` 的路径，`src` 相对课程根目录）
 
 ---
 
@@ -23,7 +24,7 @@
 
 - 课程根目录：`{{课程根目录}}`；静态站点：`{{site}}`，入口 `{{site}}/index.html`。
 - PDF 课件已被转录为「文字 + 图片」的 HTML 页面；docx/txt/视频页不在本次检查范围。
-- 每份 PDF 的元数据在 `{{site}}/_manifest.json`：每条含 `slug`、`title`、`html`（成品页绝对路径）、`imgdir`（逐页截图目录）、`pages`（总页数）、`week_dir`。**PDF 就是 ext=="pdf" 的条目，从这里读取，不要凭记忆硬编码。**
+- 每份 PDF 的元数据在 `{{site}}/_manifest.json`：每条含 `slug`、`title`、`html`（成品页相对 `{{site}}` 的路径，绝对路径 = `{{site}}\<html>`）、`imgdir`（截图目录相对路径）、`pages`（总页数）、`week_dir`。**PDF 就是 ext=="pdf" 的条目，从这里读取，不要凭记忆硬编码。**
 - 每页原始截图：`{{site}}/assets/img/<slug>/p-NN.png`（NN 两位页码，与 PDF 页码一一对应）。
 - 成品页 HTML 结构：每页一个 `<section class="page">`，首行 `<p class="pageno">第 NN 页</p>`；图片用 `<figure><img src="../assets/img/<slug>/p-NN.png" ...></figure>`；代码用 `<pre><code>`；页尾有 `ainote` 的 AI 转录声明，**不要动**。
 - 中间产物：`{{site}}/_frags/`（应为空或不存在，勿动）。
@@ -125,7 +126,10 @@ items=json.load(open(site/'_manifest.json',encoding='utf-8'))
 bad=0
 for it in items:
     if it['ext']!='pdf': continue
-    p=Path(it['html']); t=p.read_text(encoding='utf-8')
+    p=site/it['html']
+    if not p.exists():
+        print('BAD', it['slug'], '成品页不存在'); bad+=1; continue
+    t=p.read_text(encoding='utf-8')
     pages=[int(m) for m in re.findall(r'pageno\">第 (\d+) 页',t)]  # 保持阅读顺序，绝不排序
     n=it.get('pages',0)
     miss=[m for m in re.findall(r'src=\"([^\"]+)\"',t) if m.startswith('../assets') and not (p.parent/unquote(m)).exists()]

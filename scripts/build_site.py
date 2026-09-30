@@ -100,19 +100,30 @@ def build_manifest():
                 "size_mb": round(f.stat().st_size / 1048576, 1),
             })
     # 分配 slug / 输出路径
+    # manifest 只存相对路径：src 相对课程根目录，html/imgdir 相对 site/（搬迁友好、不泄露本机目录结构）
     for i, it in enumerate(items, 1):
         slug = f"w{it['week']:02d}-{i:03d}"
         it["slug"] = slug
-        folder = SITE / it["week_dir"]
-        it["html"] = str(folder / f"{slug}-{sanitize(it['title'])}.html")
         if it["ext"] == "pdf":
-            it["imgdir"] = str(IMG / slug)
-            it["pages"] = pdf_page_count(it["src"])
-            if it["pages"] is None:  # PDF 打不开时退回数截图（严格匹配，裁剪图不算页）
+            pages_now = pdf_page_count(it["src"])  # src 此刻还是绝对路径
+            it["imgdir"] = f"assets/img/{slug}"
+            if pages_now is None:  # PDF 打不开时退回数截图（严格匹配，裁剪图不算页）
                 d = IMG / slug
-                it["pages"] = len([p for p in d.iterdir()
-                                   if re.fullmatch(r"p-\d+\.png", p.name)]) if d.exists() else 0
+                pages_now = len([p for p in d.iterdir()
+                                 if re.fullmatch(r"p-\d+\.png", p.name)]) if d.exists() else 0
+            it["pages"] = pages_now
+        it["src"] = Path(it["src"]).relative_to(BASE).as_posix()
+        it["html"] = (Path(it["week_dir"]) / f"{slug}-{sanitize(it['title'])}.html").as_posix()
     return items
+
+
+def to_abs(items):
+    """运行期内部统一用绝对路径；manifest 落盘前剥掉下划线开头的临时字段。"""
+    for it in items:
+        it["_src"] = BASE / it["src"]
+        it["_html"] = SITE / it["html"]
+        if it["ext"] == "pdf":
+            it["_imgdir"] = SITE / it["imgdir"]
 
 
 # ---------------------------------------------------------------- template
@@ -149,9 +160,9 @@ def write_page(html_path: str, title: str, crumb: str, content: str, ai_note=Fal
 # ---------------------------------------------------------------- converters
 def render_pdf(item):
     import fitz
-    imgdir = Path(item["imgdir"])
+    imgdir = Path(item["_imgdir"])
     imgdir.mkdir(parents=True, exist_ok=True)
-    doc = fitz.open(item["src"])
+    doc = fitz.open(item["_src"])
     n = 0
     for i, page in enumerate(doc, 1):
         out = imgdir / f"p-{i:02d}.png"
@@ -171,16 +182,16 @@ def render_pdf(item):
 
 def conv_docx(item):
     import mammoth
-    with open(item["src"], "rb") as f:
+    with open(item["_src"], "rb") as f:
         result = mammoth.convert_to_html(f)
-    write_page(item["html"], item["title"], crumb_of(item),
+    write_page(item["_html"], item["title"], crumb_of(item),
                f'<article class="doc">{result.value}</article>')
     for w in result.messages[:3]:
         print(f"  [mammoth] {w.type}: {str(w)[:80]}")
 
 
 def conv_txt(item):
-    raw = Path(item["src"]).read_bytes()
+    raw = item["_src"].read_bytes()
     text = None
     for enc in ("utf-8", "gb18030", "utf-16"):
         try:
@@ -191,12 +202,12 @@ def conv_txt(item):
     if text is None:
         text = raw.decode("utf-8", errors="replace")
     body = f'<pre class="prompt">{html_mod.escape(text)}</pre>'
-    write_page(item["html"], item["title"], crumb_of(item), body, ai_note=False)
+    write_page(item["_html"], item["title"], crumb_of(item), body, ai_note=False)
 
 
 def conv_media(item):
-    p = Path(item["src"])
-    rel = quote(os.path.relpath(p, Path(item["html"]).parent).replace("\\", "/"))
+    p = item["_src"]
+    rel = quote(os.path.relpath(p, item["_html"].parent).replace("\\", "/"))
     if item["ext"] == "mp4":
         body = (f'<p class="hint">视频 {item["size_mb"]} MB · 可直接在线播放</p>'
                 f'<video controls preload="metadata" src="{rel}"></video>')
@@ -205,7 +216,7 @@ def conv_media(item):
                 f'<p><a class="dl" href="{rel}" download>⬇ 下载视频文件（{item["size_mb"]} MB）</a></p>')
     else:  # jpg
         body = f'<img class="solo" src="{rel}" alt="{html_mod.escape(item["title"])}">'
-    write_page(item["html"], item["title"], crumb_of(item), body)
+    write_page(item["_html"], item["title"], crumb_of(item), body)
 
 
 def crumb_of(item):
@@ -265,9 +276,9 @@ def build_index(items):
                 rows.append(f'<p class="sub">— {html_mod.escape(it["group"])} —</p>')
             last_grp = it["group"]
             badge, cls = BADGES[it["ext"]]
-            exists = Path(it["html"]).exists()
+            exists = it["_html"].exists()
             if exists:
-                link = f'<a href="{href_of(Path(it["html"]))}">{html_mod.escape(it["title"])}</a>'
+                link = f'<a href="{href_of(it["_html"])}">{html_mod.escape(it["title"])}</a>'
             else:
                 link = f'<span class="badge b-miss">AI转录中</span> {html_mod.escape(it["title"])}'
                 badge, cls = "待生成", "b-miss"
@@ -295,7 +306,7 @@ def prune_images(items):
     for it in items:
         if it["ext"] != "pdf":
             continue
-        h = Path(it["html"])
+        h = it["_html"]
         if h.exists() and "<!-- img-fallback -->" not in h.read_text(encoding="utf-8"):
             continue  # 已有转录成品页，允许清理其未引用原图
         d = IMG / it["slug"]
@@ -325,33 +336,43 @@ def pdf_chunks(item):
 
 
 def frag_final_html(item):
-    """该 PDF 的所有页都有片段覆盖时，拼装最终 html（覆盖兜底页）"""
+    """所有片段按 part 顺序拼接后，页码必须按阅读顺序恰为 1..pages 才拼装成品页
+    （缺页、重复页、错序页一律拒绝，保留片段待修复），防止坏结构混进成品。"""
     d = FRAGS / item["slug"]
     frags = d.glob("part-*.html") if d.exists() else []
     frags = sorted(frags, key=lambda f: int(re.search(r"part-(\d+)", f.name).group(1)))
     if not frags:
         return False
     pages = item.get("pages", 0)
-    covered = set()
+    seq = []
     for f in frags:
-        for m in re.findall(r'class="pageno">第 (\d+) 页', f.read_text(encoding="utf-8")):
-            covered.add(int(m))
-    if pages and covered != set(range(1, pages + 1)):
-        missing = sorted(set(range(1, pages + 1)) - covered)
-        print(f"[pending] {item['slug']} 缺页: {missing[:10]}{'...' if len(missing) > 10 else ''}")
+        seq.extend(int(m) for m in re.findall(r'class="pageno">第 (\d+) 页', f.read_text(encoding="utf-8")))
+    if pages and seq != list(range(1, pages + 1)):
+        missing = sorted(set(range(1, pages + 1)) - set(seq))
+        dup = sorted({n for n in seq if seq.count(n) > 1})
+        pos = next((i for i in range(min(len(seq), pages)) if seq[i] != i + 1), None)
+        if pos is not None:
+            hint = f"第 {pos + 1} 个位置应是页 {pos + 1}、实际是页 {seq[pos]}"
+        elif len(seq) < pages:
+            hint = "片段页数少于总页数"
+        else:
+            hint = "片段页数超过总页数"
+        print(f"[pending] {item['slug']} 片段页码未按顺序完整覆盖 1..{pages}"
+              f"（{hint}；缺:{missing[:10]}{'...' if len(missing) > 10 else ''}"
+              f" 重复:{dup[:10]}{'...' if len(dup) > 10 else ''}），保留片段待修复")
         return False
     body = "\n".join(f.read_text(encoding="utf-8") for f in frags)
-    write_page(item["html"], item["title"], crumb_of(item), body, ai_note=True)
+    write_page(item["_html"], item["title"], crumb_of(item), body, ai_note=True)
     for f in frags:
         f.unlink()
     d.rmdir()
-    print(f"[merged] {item['slug']} <- {len(frags)} frags, {len(covered)} pages")
+    print(f"[merged] {item['slug']} <- {len(frags)} frags, {len(seq)} pages")
     return True
 
 
 def img_fallback_page(item):
     """全部页截图的兜底页（带标记，可被转录合并覆盖）"""
-    if Path(item["html"]).exists():
+    if item["_html"].exists():
         return
     rel = "../"
     figs = []
@@ -359,9 +380,9 @@ def img_fallback_page(item):
     for i in range(1, n + 1):
         figs.append(f'<section class="page"><p class="pageno">第 {i} 页</p>'
                     f'<figure><img src="{rel}assets/img/{item["slug"]}/p-{i:02d}.png" alt="第 {i} 页"></figure></section>')
-    write_page(item["html"], item["title"], crumb_of(item), "\n".join(figs))
+    write_page(item["_html"], item["title"], crumb_of(item), "\n".join(figs))
     # 追加标记，便于识别这是兜底页
-    p = Path(item["html"])
+    p = item["_html"]
     p.write_text(p.read_text(encoding="utf-8").replace(
         "</head>", "</head>\n<!-- img-fallback -->"), encoding="utf-8")
     print(f"[fallback] {item['slug']} ({n} pages)")
@@ -371,6 +392,7 @@ def img_fallback_page(item):
 def main():
     cmd = sys.argv[1] if len(sys.argv) > 1 else "build"
     items = build_manifest()
+    to_abs(items)
     SITE.mkdir(exist_ok=True)
     ASSETS.mkdir(exist_ok=True)
     (ASSETS / "style.css").write_text(STYLE, encoding="utf-8")
@@ -396,7 +418,7 @@ def main():
 
     prompts = []
     for it in items:
-        target = Path(it["html"])
+        target = it["_html"]
         if target.exists():
             print(f"[skip exists] {target.name}")
             continue
@@ -413,17 +435,18 @@ def main():
             conv_media(it); print(f"[{ext}] {it['title']}")
 
     (SITE / "_manifest.json").write_text(
-        json.dumps(items, ensure_ascii=False, indent=1), encoding="utf-8")
+        json.dumps([{k: v for k, v in it.items() if not k.startswith("_")} for it in items],
+                   ensure_ascii=False, indent=1), encoding="utf-8")
 
     for it in items:
         if it["ext"] != "pdf":
             continue
-        if Path(it["html"]).exists() and "<!-- img-fallback -->" not in Path(it["html"]).read_text(encoding="utf-8"):
+        if it["_html"].exists() and "<!-- img-fallback -->" not in it["_html"].read_text(encoding="utf-8"):
             continue  # 已有转录成品
         for k, s, e in pdf_chunks(it):
             prompts.append(f"""=== 任务 {it['slug']}-part{k} | {it['title']} (第{s}-{e}页) ===
-源PDF: {it['src']}
-你负责的截图: {it['imgdir']} 目录下的 p-{s:02d}.png 到 p-{e:02d}.png
+源PDF: {it['_src']}
+你负责的截图: {it['_imgdir']} 目录下的 p-{s:02d}.png 到 p-{e:02d}.png
 输出片段绝对路径: {FRAGS / it['slug'] / f'part-{k}.html'}
 """)
     (SITE / "_agent_prompts.txt").write_text(
