@@ -18,6 +18,8 @@
 
 文字稿提炼与热力图（音频课程）：提炼子代理把 ASR 句子流升级为结构化文字稿（小标题、重点加粗、轻校对同音字，时间戳与句数不变），首页内置 GitHub 风格学习热力图，按天累计真实观看分钟数（纯 localStorage 本地存）。详见 `references/06-enrich-transcripts.md`。
 
+自包含分发：默认站点引用 site 外的原始视频；`python build_site.py localize` 把视频复制为 `site/media/<slug>.<ext>` 并改引站内副本（原件不动、自动查磁盘空间），此后 `site/` 单文件夹拷到任何电脑都能完整使用。
+
 ## 仓库结构
 
 ```

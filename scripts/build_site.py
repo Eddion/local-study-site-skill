@@ -25,6 +25,7 @@ IMG = ASSETS / "img"
 FRAGS = SITE / "_frags"
 TRANSCRIPTS = SITE / "_transcripts"            # 原始转录 JSON（可选，ASR 产出）
 ENRICHED = SITE / "_transcripts_enriched"      # 提炼版转录 JSON（可选，优先渲染）
+MEDIA_DIR = SITE / "media"                     # localize 后的站内媒体副本（自包含分发用）
 COURSE_TITLE = "我的课程"  # ← 改成你的课程名
 WEEK_DIR_RE = re.compile(r"^\d+\.")  # ← 周目录名正则，默认匹配 01.xxx / 02.xxx，不符合就改
 CHUNK = 40  # 每个转录子代理负责的PDF页数
@@ -214,11 +215,20 @@ def conv_txt(item):
     write_page(item["_html"], item["title"], crumb_of(item), body, ai_note=False)
 
 
+def media_src(item):
+    """localize 之后优先用 site/media/ 内副本（站点可单文件夹分发），
+    否则回退引用课程目录里的原始文件。"""
+    local = MEDIA_DIR / f"{item['slug']}.{item['ext']}"
+    if local.exists():
+        return quote(os.path.relpath(local, item["_html"].parent).replace("\\", "/")), True
+    return quote(os.path.relpath(item["_src"], item["_html"].parent).replace("\\", "/")), False
+
+
 def conv_media(item):
-    p = item["_src"]
-    rel = quote(os.path.relpath(p, item["_html"].parent).replace("\\", "/"))
+    rel, is_local = media_src(item)
     if item["ext"] == "mp4":
-        body = (f'<p class="hint">视频 {item["size_mb"]} MB · 可直接在线播放</p>'
+        note = " · 站点内置副本，整站可分发" if is_local else ""
+        body = (f'<p class="hint">视频 {item["size_mb"]} MB · 可直接在线播放{note}</p>'
                 f'<video controls preload="metadata" src="{rel}"></video>')
         tr = transcript_of(item)
         if tr:
@@ -227,7 +237,8 @@ def conv_media(item):
             body += '<p class="hint">暂无文字稿（转录完成后重新生成页面即可嵌入）。</p>'
         body += WATCH_TRACK_JS
     elif item["ext"] == "ts":
-        body = (f'<p class="hint">浏览器无法直接播放 .ts 格式，点击下载后用本地播放器（如 VLC、PotPlayer）打开。</p>'
+        note = "（站点内置副本）" if is_local else ""
+        body = (f'<p class="hint">浏览器无法直接播放 .ts 格式，点击下载后用本地播放器（如 VLC、PotPlayer）打开{note}。</p>'
                 f'<p><a class="dl" href="{rel}" download>⬇ 下载视频文件（{item["size_mb"]} MB）</a></p>')
     else:  # jpg
         body = f'<img class="solo" src="{rel}" alt="{html_mod.escape(item["title"])}">'
@@ -631,6 +642,30 @@ def main():
         for it in items:
             if it["ext"] == "pdf":
                 img_fallback_page(it)
+        return
+
+    if cmd == "localize":
+        # 把视频复制进 site/media/<slug>.<ext> 并让页面改引站内副本，
+        # 此后 site/ 单文件夹拷到任何位置都能完整使用（原始文件仍不动）。
+        import shutil
+        MEDIA_DIR.mkdir(exist_ok=True)
+        todo = [it for it in items if it["ext"] in ("mp4", "ts")
+                and not (MEDIA_DIR / f"{it['slug']}.{it['ext']}").exists()]
+        need = sum(it["_src"].stat().st_size for it in todo)
+        free = shutil.disk_usage(SITE).free
+        if need and free < need * 1.05:
+            print(f"[localize] 磁盘空间不足：需 {need/1073741824:.1f} GB，剩 {free/1073741824:.1f} GB，中止")
+            return
+        for i, it in enumerate(todo, 1):
+            shutil.copy2(it["_src"], MEDIA_DIR / f"{it['slug']}.{it['ext']}")
+            if i % 20 == 0 or i == len(todo):
+                print(f"[localize] {i}/{len(todo)} copied")
+        n = sum(1 for it in items if it["ext"] in ("mp4", "ts"))
+        for it in items:
+            if it["ext"] in ("mp4", "ts"):
+                conv_media(it)
+        print(f"[localize] done: {len(todo)} newly copied, {n} media pages regenerated (site-local)")
+        build_index(items)
         return
 
     if cmd == "videos":
