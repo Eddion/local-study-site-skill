@@ -16,17 +16,20 @@
 
 学习计划（可与阶段一并行）：`scripts/make_plan.py` 把资料按「每天约1小时 = 视频约25分钟 + 内化约35分钟」打包成 Day、每 6~7 天合成 Week，从标题章节号自动聚合知识模块、从先导片提炼阶段主题，目录自动渲染 Week/Day 小标题。详见 `references/05-study-plan.md`。
 
+文字稿提炼与热力图（音频课程）：提炼子代理把 ASR 句子流升级为结构化文字稿（小标题、重点加粗、轻校对同音字，时间戳与句数不变），首页内置 GitHub 风格学习热力图，按天累计真实观看分钟数（纯 localStorage 本地存）。详见 `references/06-enrich-transcripts.md`。
+
 ## 仓库结构
 
 ```
 SKILL.md                          # 技能主文件（Agent 读这个）
-scripts/build_site.py             # 构建脚本：build/merge/index/fallback 四个子命令
+scripts/build_site.py             # 构建脚本：build/merge/index/videos/fallback 子命令
 scripts/make_plan.py              # 学习计划生成：Week/Day 打包、阶段主题
 scripts/verify_toc.py             # 阶段三导航静态校验
 references/01-transcribe.md       # 阶段一执行细节：派发纪律、merge 语义、编码链
 references/02-qc-dedup.md         # 阶段二执行细节：A/B/C/D 判型、修复纪律、验收
 references/03-toc-nav.md          # 阶段三执行细节：注入流程、重建覆盖铁律
 references/05-study-plan.md       # 学习计划规则：自然排序、每天1小时节奏、参数调法
+references/06-enrich-transcripts.md # 文字稿提炼流程 + 学习热力图实现
 templates/qc-dispatcher-prompt.md # 阶段二完整可填空调度提示词
 ```
 

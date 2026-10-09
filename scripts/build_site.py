@@ -23,6 +23,8 @@ SITE = BASE / "site"
 ASSETS = SITE / "assets"
 IMG = ASSETS / "img"
 FRAGS = SITE / "_frags"
+TRANSCRIPTS = SITE / "_transcripts"            # 原始转录 JSON（可选，ASR 产出）
+ENRICHED = SITE / "_transcripts_enriched"      # 提炼版转录 JSON（可选，优先渲染）
 COURSE_TITLE = "我的课程"  # ← 改成你的课程名
 WEEK_DIR_RE = re.compile(r"^\d+\.")  # ← 周目录名正则，默认匹配 01.xxx / 02.xxx，不符合就改
 CHUNK = 40  # 每个转录子代理负责的PDF页数
@@ -218,6 +220,12 @@ def conv_media(item):
     if item["ext"] == "mp4":
         body = (f'<p class="hint">视频 {item["size_mb"]} MB · 可直接在线播放</p>'
                 f'<video controls preload="metadata" src="{rel}"></video>')
+        tr = transcript_of(item)
+        if tr:
+            body += ('<p class="hint">文字稿由 AI 从音频转录并提炼排版，可能存在少量误差。</p>' + tr)
+        else:
+            body += '<p class="hint">暂无文字稿（转录完成后重新生成页面即可嵌入）。</p>'
+        body += WATCH_TRACK_JS
     elif item["ext"] == "ts":
         body = (f'<p class="hint">浏览器无法直接播放 .ts 格式，点击下载后用本地播放器（如 VLC、PotPlayer）打开。</p>'
                 f'<p><a class="dl" href="{rel}" download>⬇ 下载视频文件（{item["size_mb"]} MB）</a></p>')
@@ -228,6 +236,114 @@ def conv_media(item):
 
 def crumb_of(item):
     return item["week_dir"] + (f" · {item['group']}" if item["group"] else "")
+
+
+# ---------------------------------------------------------------- transcript
+def expand_segments(segments):
+    """把 ASR 长段按句末标点拆成句子级 cue，时间按字数比例插值（供点击跳转）。"""
+    out = []
+    for s in segments:
+        text = (s.get("text") or "").strip()
+        if not text:
+            continue
+        dur = s["end"] - s["start"]
+        parts = [p for p in re.split(r"(?<=[。！？!?；;])", text) if p.strip()]
+        if len(parts) <= 1 or dur <= 0:
+            out.append({"start": s["start"], "end": s["end"], "text": text})
+            continue
+        total = sum(len(p) for p in parts)
+        t = s["start"]
+        for p in parts:
+            share = dur * len(p) / total
+            out.append({"start": round(t, 2), "end": round(t + share, 2), "text": p.strip()})
+            t += share
+    return out
+
+
+def fmt_ts(sec):
+    sec = int(sec)
+    return f"{sec//60:02d}:{sec%60:02d}"
+
+
+def render_blocks(data):
+    """把转录 JSON 渲染成 HTML。原始版按 segments 拆句；提炼版按 blocks
+    （h2 小标题 / cue 可点击句子）。cue 文本先整体转义、再放行 <strong>。"""
+    if "blocks" in data:
+        blocks = data["blocks"]
+    else:
+        blocks = [{"t": "cue", **s} for s in expand_segments(data.get("segments", []))]
+    cues = []
+    for b in blocks:
+        if b.get("t") == "h2":
+            cues.append(f'<h2 class="trh2">{html_mod.escape(str(b.get("x", "")))}</h2>')
+            continue
+        s, e = float(b.get("s", b.get("start", 0))), float(b.get("e", b.get("end", 0)))
+        t = html_mod.escape(str(b.get("x", b.get("text", ""))))
+        if not t:
+            continue
+        t = t.replace("&lt;strong&gt;", "<strong>").replace("&lt;/strong&gt;", "</strong>")
+        cues.append(f'<p class="cue" data-start="{s}" data-end="{e}">'
+                    f'<span class="ts">{fmt_ts(s)}</span>{t}</p>')
+    if not cues:
+        return None
+    return (f'<section class="transcript"><h2>文字稿</h2>'
+            f'<p class="hint">点击任意一句可跳转视频到对应位置</p>{"".join(cues)}</section>'
+            f"""<script>
+(function(){{
+  var v=document.querySelector('video');if(!v)return;
+  var cues=[].slice.call(document.querySelectorAll('.cue')),last=null;
+  cues.forEach(function(c){{c.addEventListener('click',function(){{
+    v.currentTime=parseFloat(c.dataset.start);v.play();}});}});
+  v.addEventListener('timeupdate',function(){{
+    var t=v.currentTime,cur=null;
+    for(var i=0;i<cues.length;i++){{
+      if(t>=+cues[i].dataset.start-0.15&&t<+cues[i].dataset.end+0.15){{cur=cues[i];break;}}
+    }}
+    if(cur!==last){{if(last)last.classList.remove('active');if(cur){{cur.classList.add('active');
+      if(window.__cueFollow!==false)cur.scrollIntoView({{block:'nearest',behavior:'smooth'}});}}last=cur;}}
+  }});
+}})();
+</script>""")
+
+
+def transcript_of(item):
+    """读转录 JSON：优先提炼版（_transcripts_enriched，含小标题/加粗），
+    否则退回原始版（_transcripts，纯句子流）。有则返回 HTML，无则 None。"""
+    for d in (ENRICHED, TRANSCRIPTS):
+        f = d / f"{item['slug']}.json"
+        if f.exists():
+            try:
+                data = json.loads(f.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            body = render_blocks(data)
+            if body:
+                return body
+    return None
+
+
+# 视频页观看时长记录：播放中的秒数按自然日累计进 localStorage（键 c2sw:年-月-日），
+# 供 index.html 的学习热力图读取。file:// 下 localStorage 各浏览器行为不一，仅作参考。
+WATCH_TRACK_JS = """<script>
+(function(){
+  var v=document.querySelector('video');if(!v)return;
+  var acc=0,last=null,timer=null;
+  function dkey(){var d=new Date();return 'c2sw:'+d.getFullYear()+'-'+(d.getMonth()+1)+'-'+d.getDate();}
+  function flush(){
+    if(acc<=0)return;
+    try{var p=parseFloat(localStorage.getItem(dkey())||'0');
+      localStorage.setItem(dkey(),(p+acc).toFixed(1));}catch(e){}
+    acc=0;
+  }
+  function tick(){if(last){acc+=(Date.now()-last)/1000;last=Date.now();flush();}}
+  v.addEventListener('play',function(){last=Date.now();if(!timer)timer=setInterval(tick,10000);});
+  v.addEventListener('pause',function(){if(last){acc+=(Date.now()-last)/1000;last=null;}flush();});
+  v.addEventListener('ended',function(){if(last){acc+=(Date.now()-last)/1000;last=null;}flush();});
+  document.addEventListener('visibilitychange',function(){
+    if(document.hidden&&last){acc+=(Date.now()-last)/1000;last=null;flush();}});
+  window.addEventListener('pagehide',function(){if(last){acc+=(Date.now()-last)/1000;last=null;}flush();});
+})();
+</script>"""
 
 
 # ---------------------------------------------------------------- css
@@ -268,6 +384,59 @@ footer{max-width:900px;margin:0 auto 3rem;padding:0 1.2rem;color:#8b949e}
 .week h2 .wkmeta{margin-left:.8em;font-size:.85rem;color:#8b949e;font-weight:normal}
 .dayhd{display:flex;align-items:baseline;gap:.8rem;margin:.9rem 0 .3rem;padding:.45rem .9rem;background:#f6f8fa;border-left:3px solid #0969da;border-radius:4px;font-weight:600}
 .dayhd .dmin{margin-left:auto;font-size:.8rem;color:#8b949e;font-weight:normal;white-space:nowrap}
+/* transcript */
+.trh2{font-size:1.05rem;margin:1.4rem 0 .4rem;padding-left:.55rem;border-left:3px solid #0969da}
+.transcript{margin-top:1.6rem}
+.transcript .cue{margin:.15rem 0;padding:.28rem .6rem;border-radius:6px;cursor:pointer;font-size:.95rem}
+.transcript .cue:hover{background:#f0f4ff}
+.transcript .cue.active{background:#fff3cd}
+.transcript .ts{display:inline-block;min-width:3.2em;margin-right:.6em;color:#8b949e;font-size:.82rem;font-variant-numeric:tabular-nums}
+/* study heatmap (GitHub style) */
+.heatmap{max-width:960px;margin:0 auto 1.5rem;padding:1rem 1.2rem;background:#fff;border:1px solid #e4e7eb;border-radius:12px}
+.hmtitle{margin:0 0 .8rem;font-weight:600}
+.hmtitle #hm-sum{color:#57606a;font-weight:normal}
+.hm-wrap{display:flex;gap:.6rem}
+.hm-months{display:grid;grid-template-columns:repeat(5,15px);gap:3px;font-size:.72rem;color:#8b949e;margin-left:1.6rem;height:1em}
+.hm-months span{overflow:visible;white-space:nowrap}
+.hm-body{display:flex;gap:.35rem}
+.hm-days{display:grid;grid-template-rows:repeat(7,13px);gap:3px;font-size:.72rem;color:#8b949e}
+.hm-grid{display:grid;grid-template-rows:repeat(7,13px);grid-auto-flow:column;grid-auto-columns:13px;gap:3px}
+.hm{display:inline-block;width:13px;height:13px;border-radius:3px;vertical-align:-2px}
+.hm.c0{background:#ebedf0}.hm.c1{background:#9be9a8}.hm.c2{background:#40c463}.hm.c3{background:#30a14e}.hm.c4{background:#216e39}
+.hm-legend{margin:.8rem 0 0;color:#8b949e;font-size:.8rem;display:flex;align-items:center;gap:4px}
+.hm-legend .hmnote{margin-left:auto}
+"""
+
+
+HEATMAP_HTML = """
+<section class="heatmap"><p class="hmtitle">📊 学习热力图 · <span id="hm-sum">加载中…</span></p>
+<div class="hm-wrap"><div id="hm-months" class="hm-months"></div><div class="hm-body">
+<div class="hm-days"><span>一</span><span></span><span>三</span><span></span><span>五</span><span></span><span></span></div>
+<div id="hm-grid" class="hm-grid"></div></div></div>
+<p class="hm-legend">少 <span class="hm c0"></span><span class="hm c1"></span><span class="hm c2"></span><span class="hm c3"></span><span class="hm c4"></span> 多
+<span class="hmnote">在视频页观看时自动按天累计（仅存本浏览器）</span></p>
+</section>
+<script>
+(function(){
+  function dkey(d){return 'c2sw:'+d.getFullYear()+'-'+(d.getMonth()+1)+'-'+d.getDate();}
+  var today=new Date();today.setHours(0,0,0,0);
+  var dow=(today.getDay()+6)%7;               /* 周一=0 */
+  var start=new Date(today);start.setDate(today.getDate()-dow-28);  /* 5 周前的周一 */
+  var grid=document.getElementById('hm-grid');if(!grid)return;
+  var total=0,days=0,cells=[],months=[],lastMonth=null;
+  for(var i=0;i<35;i++){
+    var d=new Date(start);d.setDate(start.getDate()+i);
+    var v=parseFloat(localStorage.getItem(dkey(d))||'0');
+    if(v>0){total+=v;days++;}
+    var lv=v<=0?0:v<=10?1:v<=25?2:v<=45?3:4;
+    cells.push('<span class="hm c'+lv+'" title="'+(d.getMonth()+1)+'月'+d.getDate()+'日：'+Math.round(v)+' 分钟"></span>');
+    if(i%7===0){var m=d.getMonth()+1;months.push(m!==lastMonth?('<span>'+(m)+'月</span>'):'<span></span>');lastMonth=m;}
+  }
+  grid.innerHTML=cells.join('');
+  document.getElementById('hm-months').innerHTML=months.join('');
+  document.getElementById('hm-sum').textContent='近 5 周共 '+Math.round(total)+' 分钟，学习 '+days+' 天';
+})();
+</script>
 """
 
 
@@ -324,7 +493,7 @@ def build_index(items):
     else:
         plan_sections = None
         hero_line = f'共 {len(items)} 个资料 · 点击条目学习 · 视频可直接播放'
-    parts = [f'<div class="hero"><h1>{COURSE_TITLE}</h1><p>{hero_line}</p></div>']
+    parts = [f'<div class="hero"><h1>{COURSE_TITLE}</h1><p>{hero_line}</p></div>', HEATMAP_HTML]
 
     if plan_sections:
         parts.extend(plan_sections)
@@ -462,6 +631,16 @@ def main():
         for it in items:
             if it["ext"] == "pdf":
                 img_fallback_page(it)
+        return
+
+    if cmd == "videos":
+        # 重生成媒体页（视频页是脚本产物，可安全覆盖），把已完成的转录/提炼嵌入页面
+        n = 0
+        for it in items:
+            if it["ext"] in ("mp4", "ts"):
+                conv_media(it); n += 1
+        print(f"[videos] regenerated {n} media pages")
+        build_index(items)
         return
 
     if cmd == "merge":
