@@ -43,6 +43,13 @@ def sanitize(name: str) -> str:
     return re.sub(r'[\\/:*?"<>|\s]+', "-", name).strip("-.")
 
 
+def nat_key(p: Path):
+    """自然排序：按文件名开头的集数数字排序（1,2,...,10,11 而非 1,10,100,11）。
+    网盘课程的文件名几乎都带集数前缀，字典序会把 10 排在 2 前面，必须用数字序。"""
+    m = re.match(r"(\d+)", p.stem)
+    return (int(m.group(1)) if m else 10**9, p.name)
+
+
 def week_no_of(name: str) -> int:
     """从目录名提取周号：取第一个数字串（'01.xxx'→1，'第1周'→1）。"""
     m = re.search(r"\d+", name)
@@ -70,9 +77,9 @@ def build_manifest():
                        if d.is_dir() and WEEK_DIR_RE.match(d.name))
     for wd in week_dirs:
         week_no = week_no_of(wd.name)
-        subgroups = [wd] + sorted(d for d in wd.iterdir() if d.is_dir())
+        subgroups = [wd] + sorted((d for d in wd.iterdir() if d.is_dir()), key=nat_key)
         for g in subgroups:
-            for f in sorted(g.iterdir()):
+            for f in sorted(g.iterdir(), key=nat_key):
                 if not f.is_file():
                     continue
                 ext = f.suffix.lower().lstrip(".")
@@ -88,7 +95,7 @@ def build_manifest():
                     "size_mb": round(f.stat().st_size / 1048576, 1),
                 })
     # 根目录散落文件
-    for f in sorted(BASE.iterdir()):
+    for f in sorted(BASE.iterdir(), key=nat_key):
         if f.is_file() and f.suffix.lower().lstrip(".") in BADGES:
             items.append({
                 "week": 0,
@@ -257,35 +264,84 @@ footer{max-width:900px;margin:0 auto 3rem;padding:0 1.2rem;color:#8b949e}
 .b-prompt{background:#e6f7ee;color:#0f7b3e}.b-video{background:#f3e8fd;color:#6b21a8}
 .b-img{background:#fff3cd;color:#8a6d00}.b-miss{background:#ffebe9;color:#c0392b}
 .sub{margin-left:1.2rem;color:#8b949e}
+/* study plan (Week/Day) */
+.week h2 .wkmeta{margin-left:.8em;font-size:.85rem;color:#8b949e;font-weight:normal}
+.dayhd{display:flex;align-items:baseline;gap:.8rem;margin:.9rem 0 .3rem;padding:.45rem .9rem;background:#f6f8fa;border-left:3px solid #0969da;border-radius:4px;font-weight:600}
+.dayhd .dmin{margin-left:auto;font-size:.8rem;color:#8b949e;font-weight:normal;white-space:nowrap}
 """
 
 
 # ---------------------------------------------------------------- index
-def build_index(items):
-    weeks = {}
-    for it in items:
-        weeks.setdefault((it["week"], it["week_dir"]), []).append(it)
+def item_row(it):
+    badge, cls = BADGES[it["ext"]]
+    exists = it["_html"].exists()
+    if exists:
+        link = f'<a href="{href_of(it["_html"])}">{html_mod.escape(it["title"])}</a>'
+    else:
+        link = f'<span class="badge b-miss">AI转录中</span> {html_mod.escape(it["title"])}'
+        badge, cls = "待生成", "b-miss"
+    size = f' · {it["size_mb"]} MB' if it["ext"] in ("mp4", "ts") else ""
+    grp = f'<span class="grp">{it["ext"]}{size}</span>'
+    return f'<div class="item"><span class="badge {cls}">{badge}</span>{link}{grp}</div>'
 
-    parts = [f'<div class="hero"><h1>{COURSE_TITLE}</h1><p>共 {len(items)} 个资料 · 点击条目学习 · 视频可直接播放</p></div>']
-    for (wk, wdir), its in sorted(weeks.items()):
-        label = wdir if wk else "附 · 其他资料"
+
+def planned_parts(items):
+    """有 _plan.json（make_plan.py 产出）时按 Week/Day 学习计划渲染目录；
+    没有则返回 None，退回按目录分组的平铺渲染。"""
+    f = SITE / "_plan.json"
+    if not f.exists():
+        return None
+    plan = json.loads(f.read_text(encoding="utf-8"))
+    by_slug = {it["slug"]: it for it in items}
+    planned = set()
+    parts = []
+    for wk in plan["weeks"]:
         rows = []
-        last_grp = None
-        for it in its:
-            if it["group"] and it["group"] != last_grp:
-                rows.append(f'<p class="sub">— {html_mod.escape(it["group"])} —</p>')
-            last_grp = it["group"]
-            badge, cls = BADGES[it["ext"]]
-            exists = it["_html"].exists()
-            if exists:
-                link = f'<a href="{href_of(it["_html"])}">{html_mod.escape(it["title"])}</a>'
-            else:
-                link = f'<span class="badge b-miss">AI转录中</span> {html_mod.escape(it["title"])}'
-                badge, cls = "待生成", "b-miss"
-            size = f' · {it["size_mb"]} MB' if it["ext"] in ("mp4", "ts") else ""
-            grp = f'<span class="grp">{it["ext"]}{size}</span>'
-            rows.append(f'<div class="item"><span class="badge {cls}">{badge}</span>{link}{grp}</div>')
-        parts.append(f'<section class="week"><h2>{html_mod.escape(label)}</h2><div class="items">{"".join(rows)}</div></section>')
+        for d in wk["days"]:
+            rows.append(f'<p class="dayhd">Day {d["day"]} · {html_mod.escape(str(d["title"]))}'
+                        f'<span class="dmin">视频约 {d["min"]:.0f} 分钟 · 建议配 {60 - d["min"]:.0f} 分钟笔记内化</span></p>')
+            for slug in d["items"]:
+                it = by_slug.get(slug)
+                if not it:
+                    continue
+                planned.add(slug)
+                rows.append(item_row(it))
+        parts.append(f'<section class="week"><h2>Week {wk["week"]} · {html_mod.escape(str(wk["title"]))}'
+                     f'<span class="wkmeta">Day {wk["days"][0]["day"]}–{wk["days"][-1]["day"]}</span></h2>'
+                     f'<div class="items">{"".join(rows)}</div></section>')
+    rest = [it for it in items if it["slug"] not in planned]
+    if rest:
+        rows = "".join(item_row(it) for it in rest)
+        parts.append(f'<section class="week"><h2>其他资料</h2><div class="items">{rows}</div></section>')
+    return parts, plan
+
+
+def build_index(items):
+    planned = planned_parts(items)
+    if planned:
+        plan_sections, plan = planned
+        hero_line = f'{plan.get("note", "学习计划")} · 共 {plan.get("total", "")} · 点击条目学习 · 视频可直接播放'
+    else:
+        plan_sections = None
+        hero_line = f'共 {len(items)} 个资料 · 点击条目学习 · 视频可直接播放'
+    parts = [f'<div class="hero"><h1>{COURSE_TITLE}</h1><p>{hero_line}</p></div>']
+
+    if plan_sections:
+        parts.extend(plan_sections)
+    else:
+        weeks = {}
+        for it in items:
+            weeks.setdefault((it["week"], it["week_dir"]), []).append(it)
+        for (wk, wdir), its in sorted(weeks.items()):
+            label = wdir if wk else "附 · 其他资料"
+            rows = []
+            last_grp = None
+            for it in its:
+                if it["group"] and it["group"] != last_grp:
+                    rows.append(f'<p class="sub">— {html_mod.escape(it["group"])} —</p>')
+                last_grp = it["group"]
+                rows.append(item_row(it))
+            parts.append(f'<section class="week"><h2>{html_mod.escape(label)}</h2><div class="items">{"".join(rows)}</div></section>')
 
     (SITE / "index.html").write_text(PAGE_TMPL.format(
         title="目录", course=COURSE_TITLE, rel="", crumb="首页",

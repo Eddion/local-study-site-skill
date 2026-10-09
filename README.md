@@ -1,28 +1,32 @@
 # course-to-site
 
-给编程 Agent 使用的 skill：把一门课程的资料文件夹（PDF 课件、docx 讲义、txt 提示词、mp4/ts 视频）变成一个**双击 `site/index.html` 就能打开**的本地静态学习站点——课件变成可搜索、可跳转、带章节目录的网页，视频可直接播放，无需服务器、构建工具和网络。流程与脚本被 **1298 页真实课件**验证过。
+给编程 Agent 使用的 skill：把一门课程的资料文件夹（PDF 课件、docx 讲义、txt 提示词、mp4/ts 视频）变成一个**双击 `site/index.html` 就能打开**的本地静态学习站点——课件变成可搜索、可跳转、带章节目录的网页，视频可直接播放，还能按「每天约1小时（含知识内化）」自动规划学习周、在目录上打 Week/Day 小标题；无需服务器、构建工具和网络。流程与脚本被 **1298 页真实课件**验证过。
 
 ## 安装与使用
 
 把本仓库（整个目录，含 `scripts/`、`references/`、`templates/`）放入你的编程 Agent 的 skill 目录，然后在课程文件夹里提出请求：
 
-> 使用 course-to-site，把这个课程目录做成我能双击打开的学习网站。
+> 使用 course-to-site，把这个课程目录做成我能双击打开的学习网站，并按每天1小时排好学习周。
 
 ## 三阶段流程
 
-1. **建站与转录（必做）**：`scripts/build_site.py` 扫描资料、PDF 逐页截图（2 倍率）、docx/txt/视频直接转换，自动生成分块转录任务提示词（每块 ≤40 页）；主 Agent 作为调度者派并行子智能体忠实转录（≤5 并发、限流自动退避、进度落盘可断点续跑），片段全覆盖才拼装成品页，防丢页。
+1. **建站与转录（必做）**：`scripts/build_site.py` 扫描资料（按集数数字序，不是字典序）、PDF 逐页截图（2 倍率）、docx/txt/视频直接转换，自动生成分块转录任务提示词（每块 ≤40 页）；主 Agent 作为调度者派并行子智能体忠实转录（≤5 并发、限流自动退避、进度落盘可断点续跑），片段全覆盖才拼装成品页，防丢页。
 2. **图文去重质检（PDF 页数多时必做）**：转录的粗规则会产生「文字 + 重复整页截图」（实测 69% 的页面需要处理）。普查子代理逐页对照截图分 A/B/C/D 四类，修复子代理用 pillow 裁剪视觉素材、精准补转录，最后全量校验 + 人工抽查。可填空调度提示词见 `templates/qc-dispatcher-prompt.md`。
 3. **长课件章节导航（可选）**：给 ≥60 页的课件注入内嵌样式的左侧悬浮目录，`scripts/verify_toc.py` 校验锚点 1:1 配对、组件唯一、链接文字与标题逐字一致。
+
+学习计划（可与阶段一并行）：`scripts/make_plan.py` 把资料按「每天约1小时 = 视频约25分钟 + 内化约35分钟」打包成 Day、每 6~7 天合成 Week，从标题章节号自动聚合知识模块、从先导片提炼阶段主题，目录自动渲染 Week/Day 小标题。详见 `references/05-study-plan.md`。
 
 ## 仓库结构
 
 ```
 SKILL.md                          # 技能主文件（Agent 读这个）
 scripts/build_site.py             # 构建脚本：build/merge/index/fallback 四个子命令
+scripts/make_plan.py              # 学习计划生成：Week/Day 打包、阶段主题
 scripts/verify_toc.py             # 阶段三导航静态校验
 references/01-transcribe.md       # 阶段一执行细节：派发纪律、merge 语义、编码链
 references/02-qc-dedup.md         # 阶段二执行细节：A/B/C/D 判型、修复纪律、验收
 references/03-toc-nav.md          # 阶段三执行细节：注入流程、重建覆盖铁律
+references/05-study-plan.md       # 学习计划规则：自然排序、每天1小时节奏、参数调法
 templates/qc-dispatcher-prompt.md # 阶段二完整可填空调度提示词
 ```
 
